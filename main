@@ -1,0 +1,299 @@
+#!/bin/bash
+#PBS -l nodes=1:ppn=1,vmem=8g,walltime=1:00:00
+#PBS -N app-registration-diffmetrics2anat
+#PBS -V
+CONTAINER_IMAGE="docker://gamorosino/tract_align:v1.1"
+# functions
+
+run_in_env() {
+    singularity exec -e \
+        "${CONTAINER_IMAGE}" \
+        micromamba run -n tract_align "$@"
+}
+
+setITKthreads () {
+    local threads=$1
+    export OMP_NUM_THREADS=$threads
+    export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=$threads
+    export SINGULARITYENV_OMP_NUM_THREADS=$threads
+    export SINGULARITYENV_ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS=$threads
+}
+
+
+estimateFreeCores () {
+    # Force English locale so top uses dots (.) instead of commas (,) for decimals
+    local cpu_load
+    cpu_load=$(LC_ALL=C top -b -n2 -d 0.2 | grep "Cpu(s)" | tail -n1 | awk '{print $2+$4}')
+
+    # Total online processors
+    local cpu_num_all_n
+    cpu_num_all_n=$(getconf _NPROCESSORS_ONLN)
+
+    # Calculate used and free cores safely via bc, formatting to 0 decimal places
+    local cpu_num_all
+    cpu_num_all=$(echo "scale=5; $cpu_num_all_n - (($cpu_load / 100) * $cpu_num_all_n)" | bc)
+
+    # Round down to the nearest integer safely
+    printf "%.0f\n" "$cpu_num_all"
+}
+
+
+
+#set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/"
+
+
+### === Load parameters from config.json ===
+transf_type=$(jq -r .transformation config.json)
+settings=$(jq -r .settings config.json)
+
+# === Moving image: a diffusion-derived scalar map (tensor or NODDI) ===
+# Accepts whichever scalar key is populated; first non-null wins.
+fa=$(jq -r '.fa // empty' config.json)
+md=$(jq -r '.md // empty' config.json)
+rd=$(jq -r '.rd // empty' config.json)
+ad=$(jq -r '.ad // empty' config.json)
+ndi=$(jq -r '.ndi // empty' config.json)
+isovf=$(jq -r '.isovf // empty' config.json)
+odi=$(jq -r '.odi // empty' config.json)
+moving_in=$(jq -r '.moving // empty' config.json)
+
+if [ -n "$moving_in" ] && [ "$moving_in" != "null" ]; then
+    moving=$moving_in
+elif [ -n "$fa" ] && [ "$fa" != "null" ]; then
+    moving=$fa
+elif [ -n "$ndi" ] && [ "$ndi" != "null" ]; then
+    moving=$ndi
+elif [ -n "$md" ] && [ "$md" != "null" ]; then
+    moving=$md
+elif [ -n "$rd" ] && [ "$rd" != "null" ]; then
+    moving=$rd
+elif [ -n "$ad" ] && [ "$ad" != "null" ]; then
+    moving=$ad
+elif [ -n "$isovf" ] && [ "$isovf" != "null" ]; then
+    moving=$isovf
+elif [ -n "$odi" ] && [ "$odi" != "null" ]; then
+    moving=$odi
+else
+    echo "Error: no moving diffusion metric provided (fa/md/rd/ad/ndi/isovf/odi/moving)" >&2
+    exit 1
+fi
+
+# Optional anatomical fields
+t1w=$(jq -r .t1 config.json)
+t2w=$(jq -r .t2 config.json)
+
+# === Assign first available anatomical reference ===
+if [ -n "$t1w" ] && [ "$t1w" != "null" ]; then
+    anat=$t1w
+elif [ -n "$t2w" ] && [ "$t2w" != "null" ]; then
+    anat=$t2w
+else
+    echo "Error: No valid anatomical reference found in config.json" >&2
+    exit 1
+fi
+
+dwi_moving=${moving}
+
+### === Set ANTs registration parameters ===
+
+case $transf_type in
+  "translation")
+    echo "Performing translation registration"
+
+    transl=1
+    rigid=0
+    affine=0
+    nonlin=0
+
+    ;;
+  "rigid")
+    echo "Performing rigid registration"
+
+    transl=1
+    rigid=1
+    affine=0
+    nonlin=0
+
+    ;;
+  "affine")
+    echo "Performing affine registration"
+
+    transl=1
+    rigid=1
+    affine=1
+    nonlin=0
+    ;;
+  "nonlinear")
+    echo "Performing nonlinear registration"
+
+    transl=1
+    rigid=1
+    affine=1
+    nonlin=1
+    ;;
+  *)
+    echo "Invalid transformation type"
+    exit 1
+    ;;
+esac
+
+
+#default params
+thresold=1.e-8
+diffeo="SyN[0.25]"
+
+case $settings in
+  "1")
+    echo "Using one-level registration"
+    its=10000x0x0
+    percentage=0.1
+    syn="100x0x0,0,5"
+    sigma=1x0.5x0vox
+    shrink=4x2x1
+    sigma_lin=4x2x1vox
+    shrink0=6x4x2
+    shrink_lin=3x2x1
+    ;;
+  "2")
+    its=10000x10000x0
+    percentage=0.3
+    syn="100x100x0,-0.01,5"
+    sigma=1x0.5x0vox
+    shrink=4x2x1
+    sigma_lin=4x2x1vox
+    shrink0=6x4x2
+    shrink_lin=3x2x1
+    ;;
+  "3")
+    its=10000x111110x11110
+    percentage=0.3
+    syn="100x100x30,-0.01,5"
+    sigma=1x0.5x0vox
+    shrink=4x2x1
+    sigma_lin=4x2x1vox
+    shrink0=6x4x2
+    shrink_lin=3x2x1
+    ;;
+  "4")
+    echo "Using four-level registration"
+    its=10000x10000x10000
+    percentage=0.3
+    syn="100x80x50x20,${thresold},10"
+    sigma=2x1x0.5x0vox
+    shrink=8x4x2x1
+    sigma_lin=4x2x1vox
+    shrink0=6x4x2
+    shrink_lin=3x2x1
+    ;;
+  *)
+    echo "Invalid registration setting"
+    exit 1
+    ;;
+esac
+
+f=${anat}
+m=${dwi_moving}
+stage0="-m mattes[  $f, $m , 1 , 32, regular, $percentage ] -t translation[ 0.1 ] -c [$its,$thresold,20] -u 1 -s $shrink_lin -f $shrink0 -l 1"
+stage1="-m mattes[  $f, $m , 1 , 32, regular, $percentage ] -t rigid[ 0.1 ]       -c [$its,$thresold,20] -u 1 -s $shrink_lin -f $shrink_lin -l 1"
+stage2="-m mattes[  $f, $m , 1 , 32, regular, $percentage ] -t affine[ 0.1 ]      -c [$its,$thresold,20] -u 1 -s $shrink_lin -f $shrink_lin -l 1"
+stage3="-m mattes[  $f, $m, 0.5 , 32 ] -m cc[  $f, $m, 0.5 , 4 ]   -c [ $syn ]  -t $diffeo -s $sigma -f $shrink -l 1 -u 1 -z 1 -u 1"
+
+[ ${transl} -eq 0 ]  && { stage0='';} || { diffeopost="trasl"; }
+[ ${rigid}  -eq 0 ]  && { stage1='';} || { diffeopost="rigid"; }
+[ ${affine} -eq 0 ]  && { stage2='';} || { diffeopost="affine"; }
+[ ${nonlin} -eq 0 ]  && { stage3='';} || { diffeopost=$( echo $diffeo | cut -d "[" -f1 );}
+
+### === Output paths ===
+ANTs_outputs="ANTs_outputs"
+mkdir -p ${ANTs_outputs}
+
+### === Perform ANTs registration ===
+echo "Running ANTs registration..."
+filenamem=$(basename "${dwi_moving}")
+name_noext="${filenamem%.nii.gz}"     # remove .nii.gz if present
+name_noext="${name_noext%.nii}"      # remove .nii if present
+ANTsprefix=${ANTs_outputs}/${name_noext}_${diffeopost}
+ANTsdiff=${ANTsprefix}"diff.nii.gz"
+ANTsinv=${ANTsprefix}"inv.nii.gz"
+
+# 1. Calculate free cores
+free_cores=$(estimateFreeCores)
+
+# 2. Fallback to 1 if the system is fully loaded
+if [ "$free_cores" -lt 1 ]; then
+    free_cores=1
+fi
+
+# 3. Set and export variables for the container
+setITKthreads "$free_cores"
+
+echo "    antsRegistration \
+    -d 3 \
+    -r [${anat},${dwi_moving},1] \
+    $stage0\
+    $stage1\
+    $stage2\
+    $stage3\
+    -o [${ANTsprefix},${ANTsdiff},${ANTsinv}] \
+    --verbose"
+
+singularity exec -e docker://brainlife/ants:2.2.0-1bc \
+    antsRegistration \
+    -d 3 \
+    -r [${anat},${dwi_moving},1] \
+    $stage0\
+    $stage1\
+    $stage2\
+    $stage3\
+    -o [${ANTsprefix},${ANTsdiff},${ANTsinv}] \
+    --verbose
+
+### === Apply transformation to moving image using ANTs ===
+  WarpField=${ANTsprefix}"1Warp.nii.gz"
+  InverseWarpField=${ANTsprefix}"1InverseWarp.nii.gz"
+  AffineMat=${ANTsprefix}"0GenericAffine.mat"
+  moving_warped=${ANTsprefix}"warped.nii.gz"
+  [ ${nonlin} -eq 1 ]  && { warp_cmd="-t  ${WarpField}"; }
+  singularity exec -e docker://brainlife/ants:2.2.0-1bc \
+    antsApplyTransforms -d 3 \
+                        -i ${dwi_moving} \
+                        -r ${anat} \
+                        ${warp_cmd} \
+                        -t  ${AffineMat} \
+			-o ${moving_warped}
+
+### === format output in brainlife datatype style ===
+
+transformations=${SCRIPT_DIR}'/transformations/'
+mkdir -p ${transformations}
+if [ ${nonlin} -eq 0 ]; then
+	WarpField='None'
+else
+	cp $WarpField ${transformations}'/warp.nii.gz'
+	cp $InverseWarpField ${transformations}'/inverse-warp.nii.gz'
+fi
+singularity exec -e docker://brainlife/ants:2.2.0-1bc ConvertTransformFile 3 $AffineMat  ${transformations}'/affine.txt'
+
+### === Copy the registered moving map alongside the transforms ===
+outputdir=${SCRIPT_DIR}'/transformed'
+mkdir -p ${outputdir}
+cp ${moving_warped} ${outputdir}/$(basename "${moving}")
+
+### === Registration QC: edge-overlay of warped moving map on the anatomical ===
+
+mkdir -p "${SCRIPT_DIR}/QC"
+run_in_env python3 "${SCRIPT_DIR}/generate_qc.py" \
+    --fixed "${anat}" \
+    --moving-orig "${dwi_moving}" \
+    --moving-warped "${moving_warped}" \
+    --outdir "${SCRIPT_DIR}/QC"
+
+### === Generate brainlife product.json and figures manifest ===
+
+echo "Generating product.json ..."
+bash "${SCRIPT_DIR}/generate_product_json.sh" --compress "${SCRIPT_DIR}/QC" "${SCRIPT_DIR}/product.json"
+
+bash "${SCRIPT_DIR}/generate_figures_manifest.sh" "${SCRIPT_DIR}/QC" "${SCRIPT_DIR}"
+echo "Registration QC complete."

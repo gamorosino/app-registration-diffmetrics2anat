@@ -1,0 +1,10 @@
+config.json
+ANTs_outputs/
+transformations/
+transformed/
+QC/
+figures/
+product.json
+work/
+temp/
+b0/
