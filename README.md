@@ -1,138 +1,117 @@
-# Diffusion Metrics-to-Anatomical Registration
+<h1 align="center">registration diffmetrics2anat</h1>
 
-A reproducible and automated pipeline to register a diffusion-derived scalar
-map — tensor-based (FA, MD, RD, AD) or NODDI-based (NDI, ISOVF, ODI) — to an
-anatomical MRI reference (e.g. T1-weighted), using configurable transformation
-stages, and to reslice that map onto the anatomical grid.
+<p align="center">
+  Registers a NODDI scalar map (NDI, ISOVF or ODI) to a T1w or T2w anatomical image with ANTs (translation, rigid, affine or SyN) and reslices it onto the anatomical grid, with QC figures.
+</p>
 
-This is a companion to
-[`app-registration-dwi2anat`](https://github.com/gamorosino/app-registration-dwi2anat),
-trimmed down for the case where you already have a scalar diffusion metric
-map instead of a raw 4D DWI: no b=0 extraction step, and no DWI gradient
-reorientation (there is nothing to reorient in a scalar map). The moving
-image goes straight into ANTs.
+<p align="center">
+  <a href="https://github.com/brainlife/abcd-spec"><img src="https://img.shields.io/badge/ABCD_Spec-v1.1-green.svg" alt="ABCD Spec v1.1"></a>
+  <a href="https://doi.org/10.25663/brainlife.app.980"><img src="https://img.shields.io/badge/Brainlife-brainlife.app.980-blue.svg" alt="Run on brainlife.io"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-see_LICENSE-lightgrey.svg" alt="License"></a>
+</p>
 
-Motivation: diffusion-derived scalar maps and the whole-brain tractogram
-they're meant to be sampled against are not always reconstructed on the same
-field of view. A tractogram built with anatomically-constrained tracking
-(against a T1-derived tissue mask) can extend past the edges of the native
-diffusion-reconstruction grid — most visibly at the inferior brainstem/
-cerebellum boundary — and any downstream tool that indexes those scalar maps
-by voxel coordinate (e.g. tract-profile extraction) can throw an
-out-of-bounds error for streamline points that fall just outside that grid.
-Registering (and reslicing) the scalar maps onto the anatomical's larger FOV
-resolves this.
+## At a glance
 
----
+<!-- brainlife-app:begin (generated from the App manifest; edit the manifest, not this block) -->
 
-## Author
+> **Registers a NODDI scalar map (NDI, ISOVF or ODI) to a T1w or T2w anatomical image with ANTs (translation, rigid, affine or SyN) and reslices it onto the anatomical grid, with QC figures.**
 
-**Gabriele Amorosino**
-(email: [gabriele.amorosino@utexas.edu](mailto:gabriele.amorosino@utexas.edu))
+Runs antsRegistration with configurable stages and pyramid depth, then antsApplyTransforms to reslice the moving map onto the anatomical image; outputs the transforms, the resliced map and before/after edge-overlay QC images. Use it to bring diffusion scalar maps onto the anatomical field of view, for example so that tract profiles of an anatomically constrained tractogram do not fall outside the diffusion grid. Only one map is registered: the first available of ndi, isovf, odi; apply the transform to the other maps with app-apply-ants-transform. Not for vector fields such as NODDI dir.
 
----
+| | |
+|---|---|
+| **Inputs** | `neuro/noddi` · `neuro/anat/t1w` (optional) · `neuro/anat/t2w` (optional) |
+| **Outputs** | `neuro/transform/nifti` · `neuro/noddi` · `generic/images` |
+| **Container** | `gamorosino/tract_align:v1.1` |
+| **Resources** | 1 CPUs · 1 h walltime |
+| **Run it** | [doi.org/10.25663/brainlife.app.980](https://doi.org/10.25663/brainlife.app.980) |
 
-## Description
+#### Inputs
 
-This pipeline registers a diffusion-derived scalar map to a selected
-anatomical image using ANTs (`antsRegistration`, staged translation → rigid →
-affine → nonlinear, configurable), then reslices that same map onto the
-anatomical grid with `antsApplyTransforms`. The workflow is configured via a
-`config.json` file and supports execution in containerized environments
-(Singularity).
+| Input | Datatype | Required | Description |
+|---|---|---|---|
+| `noddi_moving` | `neuro/noddi` | yes | NODDI scalar maps; the first available map (ndi, isovf, odi) is used as the moving image. 3D scalar volumes. |
+| `t1_fixed` | `neuro/anat/t1w` | no | T1-weighted anatomical reference (fixed image). Used if present. |
+| `t2_fixed` | `neuro/anat/t2w` | no | T2-weighted anatomical reference, used only when no T1w is given. At least one of t1_fixed or t2_fixed is required. |
 
-**Supported moving images:** `fa`, `md`, `rd`, `ad` (tensor), `ndi`, `isovf`,
-`odi` (NODDI) — all plain 3D scalar volumes.
+#### Outputs
 
-**Not supported:** NODDI's `dir` (a 3-vector orientation field). Reslicing
-each of its components independently under anything beyond a pure
-translation would rotate the underlying directions incorrectly. Reorienting
-`dir` needs a vector-aware tool (e.g. FSL's `vecreg`) — out of scope here.
+| Output | Datatype | Description |
+|---|---|---|
+| `transformations` | `neuro/transform/nifti` | Affine + optional warp/inverse-warp computed by ANTs registration. |
+| `transformed` | `neuro/noddi` | The registered NODDI scalar map, resliced onto the anatomical grid. |
+| `figures` | `generic/images` | Registration QC: edge-overlay before/after, orthoview + per-plane. |
 
-**Applying the resulting transform to other maps:** this app only computes
-the transform and reslices the one map you register with. To apply that same
-transform to additional scalar maps (e.g. register FA, then also reslice
-MD/RD/AD/NDI/ISOVF/ODI with the transform already computed), use
-[`app-apply-ants-transform`](https://github.com/gamorosino/app-apply-ants-transform)
-with this app's `transformations/` output.
+<details>
+<summary><b>Parameters</b> (2)</summary>
 
----
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `transformation` | enum | `rigid` | Stages to run: translation only, +rigid, +affine, or +nonlinear (SyN). Options: `translation`, `rigid`, `affine`, `nonlinear`. |
+| `settings` | enum | `1` | Depth of the multiresolution (pyramidal) registration strategy. Higher = more levels, finer correspondence, slower. Options: `1`, `2`, `3`, `4`. |
 
-## Requirements
+</details>
 
-- [Singularity](https://sylabs.io/guides/latest/user-guide/)
+<!-- brainlife-app:end -->
 
----
+## Versions on brainlife.io
 
-## Usage
+This repository hosts several Apps, each built from its own branch.
 
-### Running on Brainlife.io
+| App | Branch | Run it | Status |
+|---|---|---|---|
+| NODDI-to-Anatomical MRI Registration | [`main`](https://github.com/gamorosino/app-registration-diffmetrics2anat/tree/main) | [doi:10.25663/brainlife.app.980](https://doi.org/10.25663/brainlife.app.980) | current |
+| DTI Metrics-to-Anatomical Registration | [`main`](https://github.com/gamorosino/app-registration-diffmetrics2anat/tree/main) | [doi:10.25663/brainlife.app.978](https://doi.org/10.25663/brainlife.app.978) | available |
 
-#### On Brainlife.io via Web UI
+## Running the App
 
-1. Navigate to the [Brainlife.io](https://brainlife.io) platform and locate the `app-registration-diffmetrics2anat` app.
-2. Click the **Execute** tab.
-3. Upload required inputs:
-   - A diffusion-derived scalar map (`fa`/`md`/`rd`/`ad`/`ndi`/`isovf`/`odi`, `.nii.gz`)
-   - An anatomical image (T1w or T2w)
-4. Submit the job. Output will include the registered/resliced map and its transformation matrices/fields.
+### On brainlife.io
 
-#### On Brainlife.io via CLI
+Open the App at [doi.org/10.25663/brainlife.app.980](https://doi.org/10.25663/brainlife.app.980), choose `neuro/noddi`, `neuro/anat/t1w`, `neuro/anat/t2w` from your project, set the parameters and press **Execute**. The results are saved to your project as `neuro/transform/nifti`, `neuro/noddi`, `generic/images`.
 
-1. Install the Brainlife CLI: https://brainlife.io/docs/cli/
-2. Log in:
-   ```bash
-   bl login
-   ```
-3. Run the app:
-   ```bash
-   bl app run --id <app_id> --project <project_id> \
-     --input fa:<fa_dataset_id> \
-     --input t1:<t1_dataset_id>
-   ```
+### Locally
 
-Replace IDs with the appropriate dataset and project references.
+You need [Singularity/Apptainer](https://apptainer.org/) (the App runs in `gamorosino/tract_align:v1.1`), [`jq`](https://jqlang.github.io/jq/).
 
----
+1. Clone this repository and check out the App's branch (`git checkout main`).
+2. Create `config.json` with the paths to your inputs and the parameters:
 
-### Running Locally
-
-#### Option 1: Using a Configuration File
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/gamorosino/app-registration-diffmetrics2anat.git
-   cd app-registration-diffmetrics2anat
-   ```
-
-2. Create a `config.json`:
    ```json
    {
-       "fa": "sub-01_fa.nii.gz",
-       "t1": "sub-01_T1w.nii.gz",
+       "ndi": "/path/to/noddi_moving/ndi",
+       "isovf": "/path/to/noddi_moving/isovf",
+       "odi": "/path/to/noddi_moving/odi",
+       "t1": "/path/to/t1_fixed/t1",
+       "t2": "/path/to/t2_fixed/t2",
        "transformation": "rigid",
        "settings": "1"
    }
    ```
-   (`moving` also works as an explicit generic key instead of `fa`/`md`/`rd`/`ad`/`ndi`/`isovf`/`odi`.)
 
-3. Run the pipeline:
-   ```bash
-   bash ./main
-   ```
+3. Run `./main`.
 
-#### Option 2: Using the CLI Wrapper
+## Troubleshooting
 
-```bash
-./main_cli.sh --moving sub-01_fa.nii.gz --t1w sub-01_T1w.nii.gz \
-              --transformation rigid --settings 1
-```
+- **Error: No valid anatomical reference found in config.json**: Provide a T1w or T2w input.
+- **Error: no moving diffusion metric provided (fa/md/rd/ad/ndi/isovf/odi/moving)**: Provide an input containing at least one scalar map.
+
+## Citing
+
+If you use this App, please cite it, the software it builds on and brainlife.io:
+
+- NODDI-to-Anatomical MRI Registration. brainlife.io App. [doi:10.25663/brainlife.app.980](https://doi.org/10.25663/brainlife.app.980)
+- Avants et al. A reproducible evaluation of ANTs similarity metric performance in brain image registration. *NeuroImage* 54:2033-2044 (2011). [doi:10.1016/j.neuroimage.2010.09.025](https://doi.org/10.1016/j.neuroimage.2010.09.025)
+- Zhang et al. NODDI: Practical in vivo neurite orientation dispersion and density imaging of the human brain. *NeuroImage* 61:1000-1016 (2012). [doi:10.1016/j.neuroimage.2012.03.072](https://doi.org/10.1016/j.neuroimage.2012.03.072)
+- Hayashi S, Caron BA, Heinsfeld AS, et al. brainlife.io: a decentralized and open-source cloud platform to support neuroscience research. *Nature Methods* 21:809–813 (2024). [doi:10.1038/s41592-024-02237-2](https://doi.org/10.1038/s41592-024-02237-2)
+- Avesani P, McPherson B, Hayashi S, et al. The open diffusion data derivatives, brain data upcycling via integrated publishing of derivatives and reproducible open cloud services. *Scientific Data* 6:69 (2019). [doi:10.1038/s41597-019-0073-y](https://doi.org/10.1038/s41597-019-0073-y)
+
+## Authors
+
+**Gabriele Amorosino**
+(email:
 
 ---
 
-## Outputs
+## License
 
-- `ANTs_outputs/` — ANTs registration outputs: affine matrix, warp fields
-- `transformations/` — Final transformation files (formatted for Brainlife: `affine.txt`, `warp.nii.gz`, `inverse-warp.nii.gz`)
-- `transformed/` — The registered/resliced scalar map, on the anatomical grid
-- `QC/` — Edge-overlay registration QC figures (before/after, orthoview + per-plane)
+See [LICENSE](LICENSE).
